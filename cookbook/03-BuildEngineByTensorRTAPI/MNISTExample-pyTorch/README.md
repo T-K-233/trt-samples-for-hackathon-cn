@@ -1,5 +1,9 @@
 #
 
+```bash
+pip install cuda-python
+```
+
 ## Steps to run
 
 ```shell
