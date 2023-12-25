@@ -17,6 +17,7 @@
 import os
 from datetime import datetime as dt
 from glob import glob
+import time
 
 import calibrator
 import cv2
@@ -119,16 +120,30 @@ for epoch in range(10):
             y_, z = model(xTest)
             acc += t.sum(z == t.matmul(yTest, t.Tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]).to("cuda:0"))).cpu().numpy()
             n += xTest.shape[0]
-        print("%s, epoch %2d, loss = %f, test acc = %f" % (dt.now(), epoch + 1, loss.data, acc / n))
+        # print("%s, epoch %2d, loss = %f, test acc = %f" % (dt.now(), epoch + 1, loss.data, acc / n))
+print("finished training")
+
+xTest = Variable(xTest).cuda()
+yTest = Variable(yTest).cuda()
+for i in range(1000):
+    y_, z = model(xTest)
+start_time = time.time()
+for i in range(1000):
+    y_, z = model(xTest)
+# 1.6s
+print("time taken torch:", time.time() - start_time)
+
 
 print("Succeeded building model in pyTorch!")
 
 # Export model as ONNX file ----------------------------------------------------
-t.onnx.export(model, t.randn(1, 1, nHeight, nWidth, device="cuda"), onnxFile, input_names=["x"], output_names=["y", "z"], do_constant_folding=True, verbose=True, keep_initializers_as_inputs=True, opset_version=12, dynamic_axes={"x": {0: "nBatchSize"}, "z": {0: "nBatchSize"}})
+t.onnx.export(model, t.randn(1, 1, nHeight, nWidth, device="cuda"), onnxFile, input_names=["x"], output_names=["y", "z"], do_constant_folding=True, verbose=True, keep_initializers_as_inputs=True, opset_version=15, dynamic_axes={"x": {0: "nBatchSize"}, "z": {0: "nBatchSize"}})
 print("Succeeded converting model into ONNX!")
 
 # Parse network, rebuild network and do inference in TensorRT ------------------
-logger = trt.Logger(trt.Logger.VERBOSE)
+
+#logger = trt.Logger(trt.Logger.VERBOSE)
+logger = trt.Logger(trt.Logger.WARNING)
 builder = trt.Builder(logger)
 network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
 profile = builder.create_optimization_profile()
@@ -174,31 +189,39 @@ context.set_input_shape(lTensorName[0], [1, 1, nHeight, nWidth])
 for i in range(nIO):
     print("[%2d]%s->" % (i, "Input " if i < nInput else "Output"), engine.get_tensor_dtype(lTensorName[i]), engine.get_tensor_shape(lTensorName[i]), context.get_tensor_shape(lTensorName[i]), lTensorName[i])
 
-bufferH = []
 data = cv2.imread(inferenceImage, cv2.IMREAD_GRAYSCALE).astype(np.float32).reshape(1, 1, nHeight, nWidth)
-bufferH.append(np.ascontiguousarray(data))
-for i in range(nInput, nIO):
-    bufferH.append(np.empty(context.get_tensor_shape(lTensorName[i]), dtype=trt.nptype(engine.get_tensor_dtype(lTensorName[i]))))
-bufferD = []
-for i in range(nIO):
-    bufferD.append(cudart.cudaMalloc(bufferH[i].nbytes)[1])
 
-for i in range(nInput):
-    cudart.cudaMemcpy(bufferD[i], bufferH[i].ctypes.data, bufferH[i].nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice)
+start_time = time.time()
 
-for i in range(nIO):
-    context.set_tensor_address(lTensorName[i], int(bufferD[i]))
+for i in range(1000):
+    bufferH = []
+    bufferH.append(np.ascontiguousarray(data))
+    for i in range(nInput, nIO):
+        bufferH.append(np.empty(context.get_tensor_shape(lTensorName[i]), dtype=trt.nptype(engine.get_tensor_dtype(lTensorName[i]))))
+    bufferD = []
+    for i in range(nIO):
+        bufferD.append(cudart.cudaMalloc(bufferH[i].nbytes)[1])
 
-context.execute_async_v3(0)
 
-for i in range(nInput, nIO):
-    cudart.cudaMemcpy(bufferH[i].ctypes.data, bufferD[i], bufferH[i].nbytes, cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost)
+    for i in range(nInput):
+        cudart.cudaMemcpy(bufferD[i], bufferH[i].ctypes.data, bufferH[i].nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice)
 
-for i in range(nIO):
-    print(lTensorName[i])
-    print(bufferH[i])
+    for i in range(nIO):
+        context.set_tensor_address(lTensorName[i], int(bufferD[i]))
 
-for b in bufferD:
-    cudart.cudaFree(b)
+    context.execute_async_v3(0)
+
+    for i in range(nInput, nIO):
+        cudart.cudaMemcpy(bufferH[i].ctypes.data, bufferD[i], bufferH[i].nbytes, cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost)
+
+    # for i in range(nIO):
+    #     print(lTensorName[i])
+    #     print(bufferH[i])
+
+    for b in bufferD:
+        cudart.cudaFree(b)
+
+# 0.3s
+print("time taken cuda:", time.time() - start_time)
 
 print("Succeeded running model in TensorRT!")
